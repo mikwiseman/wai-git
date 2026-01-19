@@ -17,7 +17,7 @@
 #
 set -euo pipefail
 
-VERSION="1.2.1"
+VERSION="1.2.2"
 CONFIG_DIR="${HOME}/.config/acp"
 CONFIG_FILE="${CONFIG_DIR}/config"
 
@@ -398,16 +398,50 @@ stage_changes() {
 }
 
 get_diff() {
-    # Get staged diff (limit to reasonable size for API)
-    local diff
-    diff=$(git diff --cached --stat && echo "---" && git diff --cached | head -c 10000)
+    # Get staged diff with smart limits for AI analysis
+    # Budget: ~10,000 tokens (~40KB) - enough for quality commit messages
+    local stat
+    local changes=""
+    local total_size=0
+    local max_size=40000      # 40KB total limit
+    local per_file_limit=3000 # 3KB per file
 
-    if [[ -z "${diff}" ]]; then
+    # Full stat - always included (shows ALL files)
+    stat=$(git diff --cached --stat)
+
+    if [[ -z "${stat}" ]]; then
         print_error "No staged changes found"
         exit 1
     fi
 
-    echo "${diff}"
+    # Get list of changed files
+    local files
+    files=$(git diff --cached --name-only)
+
+    # For each file, extract only changed lines (+ and -)
+    while IFS= read -r file; do
+        if [[ -n "${file}" ]]; then
+            local file_changes
+            # grep only + and - lines (changes), exclude +++ and --- headers
+            file_changes=$(git diff --cached -- "${file}" | grep -E '^[\+\-]' | grep -v -E '^(\+\+\+|---)' | head -c ${per_file_limit})
+
+            if [[ -n "${file_changes}" ]]; then
+                changes="${changes}
+=== ${file} ===
+${file_changes}"
+                total_size=$((total_size + ${#file_changes}))
+            fi
+
+            if [[ ${total_size} -gt ${max_size} ]]; then
+                changes="${changes}
+... (more files, limit ${max_size} bytes)"
+                break
+            fi
+        fi
+    done <<< "${files}"
+
+    echo "${stat}
+${changes}"
 }
 
 get_branch() {
