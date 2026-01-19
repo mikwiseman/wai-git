@@ -17,7 +17,7 @@
 #
 set -euo pipefail
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 CONFIG_DIR="${HOME}/.config/acp"
 CONFIG_FILE="${CONFIG_DIR}/config"
 
@@ -75,6 +75,15 @@ ${BOLD}acp${NC} - AI-powered git add, commit, and push
 
 ${BOLD}USAGE${NC}
     acp [options]
+    acp setup                  # Interactive setup wizard
+    acp config <command>       # Manage configuration
+
+${BOLD}COMMANDS${NC}
+    setup                      Interactive setup wizard
+    config list                Show current configuration
+    config set <key> <value>   Set a configuration value
+    config get <key>           Get a configuration value
+    config path                Show config file location
 
 ${BOLD}OPTIONS${NC}
     -y, --yes       Skip confirmation prompt
@@ -87,6 +96,7 @@ ${BOLD}OPTIONS${NC}
     -v, --version   Show version number
 
 ${BOLD}EXAMPLES${NC}
+    acp setup                # First-time setup wizard
     acp                      # Stage all, generate message, commit, push
     acp --dry-run            # Generate message without committing
     acp --provider claude    # Use Claude instead of OpenAI
@@ -94,20 +104,14 @@ ${BOLD}EXAMPLES${NC}
     acp -y                   # Skip confirmation
     acp --scope auth         # Add scope: feat(auth): ...
 
-${BOLD}CONFIGURATION${NC}
-    Config file: ~/.config/acp/config
-
-    # Provider settings
-    ACP_PROVIDER=openai              # claude | openai | ollama
-    ACP_OPENAI_API_KEY=sk-...
-    ACP_OPENAI_MODEL=gpt-5-mini
-    ACP_CLAUDE_API_KEY=sk-ant-...
-    ACP_CLAUDE_MODEL=claude-haiku-4-5
-    ACP_OLLAMA_MODEL=                # Leave empty to auto-detect
-
-    # Behavior
-    ACP_AUTO_PUSH=true
-    ACP_CONVENTIONAL=true
+${BOLD}CONFIG KEYS${NC}
+    provider                 AI provider (openai, claude, ollama)
+    openai_api_key           OpenAI API key
+    openai_model             OpenAI model (default: gpt-5-mini)
+    claude_api_key           Claude/Anthropic API key
+    claude_model             Claude model (default: claude-haiku-4-5)
+    ollama_model             Ollama model (auto-detect if empty)
+    auto_push                Auto-push after commit (true/false)
 
 ${BOLD}MORE INFO${NC}
     https://github.com/mikwiseman/wai-git
@@ -148,6 +152,274 @@ ensure_config_dir() {
     if [[ ! -d "${CONFIG_DIR}" ]]; then
         mkdir -p "${CONFIG_DIR}"
     fi
+}
+
+# ============================================================================
+# Setup & Config Commands
+# ============================================================================
+
+# Map user-friendly key names to config variable names
+key_to_var() {
+    case "$1" in
+        provider)        echo "ACP_PROVIDER" ;;
+        openai_api_key)  echo "ACP_OPENAI_API_KEY" ;;
+        openai_model)    echo "ACP_OPENAI_MODEL" ;;
+        claude_api_key)  echo "ACP_CLAUDE_API_KEY" ;;
+        claude_model)    echo "ACP_CLAUDE_MODEL" ;;
+        ollama_model)    echo "ACP_OLLAMA_MODEL" ;;
+        auto_push)       echo "ACP_AUTO_PUSH" ;;
+        *)               echo "" ;;
+    esac
+}
+
+# Set a config value
+config_set() {
+    local key="$1"
+    local value="$2"
+    local var_name
+
+    var_name=$(key_to_var "${key}")
+    if [[ -z "${var_name}" ]]; then
+        print_error "Unknown config key: ${key}"
+        echo "Valid keys: provider, openai_api_key, openai_model, claude_api_key, claude_model, ollama_model, auto_push"
+        exit 1
+    fi
+
+    ensure_config_dir
+
+    # Create config file if it doesn't exist
+    if [[ ! -f "${CONFIG_FILE}" ]]; then
+        cat > "${CONFIG_FILE}" << 'HEADER'
+# acp configuration
+# https://github.com/mikwiseman/wai-git
+HEADER
+    fi
+
+    # Check if key already exists in config
+    if grep -q "^${var_name}=" "${CONFIG_FILE}" 2>/dev/null; then
+        # Update existing key
+        sed -i.bak "s|^${var_name}=.*|${var_name}=${value}|" "${CONFIG_FILE}"
+        rm -f "${CONFIG_FILE}.bak"
+    else
+        # Add new key
+        echo "${var_name}=${value}" >> "${CONFIG_FILE}"
+    fi
+
+    print_success "Set ${key} = ${value}"
+}
+
+# Get a config value
+config_get() {
+    local key="$1"
+    local var_name
+
+    var_name=$(key_to_var "${key}")
+    if [[ -z "${var_name}" ]]; then
+        print_error "Unknown config key: ${key}"
+        exit 1
+    fi
+
+    if [[ -f "${CONFIG_FILE}" ]]; then
+        local value
+        value=$(grep "^${var_name}=" "${CONFIG_FILE}" 2>/dev/null | cut -d'=' -f2- || true)
+        if [[ -n "${value}" ]]; then
+            echo "${value}"
+        else
+            echo "(not set)"
+        fi
+    else
+        echo "(not set)"
+    fi
+}
+
+# List all config
+config_list() {
+    echo -e "${BOLD}Configuration${NC} (${CONFIG_FILE})"
+    echo ""
+
+    if [[ ! -f "${CONFIG_FILE}" ]]; then
+        print_warning "No config file found. Run 'acp setup' to configure."
+        return
+    fi
+
+    local keys=("provider" "openai_api_key" "openai_model" "claude_api_key" "claude_model" "ollama_model" "auto_push")
+
+    for key in "${keys[@]}"; do
+        local var_name value display_value
+        var_name=$(key_to_var "${key}")
+        value=$(grep "^${var_name}=" "${CONFIG_FILE}" 2>/dev/null | cut -d'=' -f2- || true)
+
+        # Mask API keys
+        if [[ "${key}" == *"api_key"* ]] && [[ -n "${value}" ]]; then
+            display_value="${value:0:10}...${value: -4}"
+        elif [[ -n "${value}" ]]; then
+            display_value="${value}"
+        else
+            display_value="${YELLOW}(not set)${NC}"
+        fi
+
+        printf "  %-16s %b\n" "${key}:" "${display_value}"
+    done
+}
+
+# Config command handler
+cmd_config() {
+    local subcmd="${1:-}"
+    shift || true
+
+    case "${subcmd}" in
+        list|"")
+            config_list
+            ;;
+        set)
+            if [[ $# -lt 2 ]]; then
+                print_error "Usage: acp config set <key> <value>"
+                exit 1
+            fi
+            config_set "$1" "$2"
+            ;;
+        get)
+            if [[ $# -lt 1 ]]; then
+                print_error "Usage: acp config get <key>"
+                exit 1
+            fi
+            config_get "$1"
+            ;;
+        path)
+            echo "${CONFIG_FILE}"
+            ;;
+        *)
+            print_error "Unknown config command: ${subcmd}"
+            echo "Usage: acp config [list|set|get|path]"
+            exit 1
+            ;;
+    esac
+}
+
+# Interactive setup wizard
+cmd_setup() {
+    echo ""
+    echo -e "${BOLD}acp setup${NC} - Configure AI-powered git commits"
+    echo ""
+
+    ensure_config_dir
+
+    # Step 1: Choose provider
+    echo -e "${BOLD}Step 1:${NC} Choose your AI provider"
+    echo ""
+    echo "  1) ${GREEN}openai${NC}  - OpenAI API (gpt-5-mini, fast & cheap)"
+    echo "  2) ${GREEN}claude${NC}  - Anthropic Claude (claude-haiku-4-5, great quality)"
+    echo "  3) ${GREEN}ollama${NC}  - Local models (free, private, requires Ollama)"
+    echo ""
+
+    local provider_choice
+    while true; do
+        echo -n "Select provider [1-3]: "
+        read -r provider_choice
+        case "${provider_choice}" in
+            1) SELECTED_PROVIDER="openai"; break ;;
+            2) SELECTED_PROVIDER="claude"; break ;;
+            3) SELECTED_PROVIDER="ollama"; break ;;
+            *) print_error "Please enter 1, 2, or 3" ;;
+        esac
+    done
+
+    config_set "provider" "${SELECTED_PROVIDER}"
+    echo ""
+
+    # Step 2: Configure API key (if needed)
+    case "${SELECTED_PROVIDER}" in
+        openai)
+            echo -e "${BOLD}Step 2:${NC} Enter your OpenAI API key"
+            echo ""
+            echo "  Get your key at: ${CYAN}https://platform.openai.com/api-keys${NC}"
+            echo ""
+            echo -n "API key (sk-...): "
+            read -rs api_key
+            echo ""
+
+            if [[ -n "${api_key}" ]]; then
+                config_set "openai_api_key" "${api_key}"
+            else
+                print_warning "Skipped - you can set it later with: acp config set openai_api_key <key>"
+            fi
+            ;;
+        claude)
+            echo -e "${BOLD}Step 2:${NC} Enter your Anthropic API key"
+            echo ""
+            echo "  Get your key at: ${CYAN}https://console.anthropic.com/settings/keys${NC}"
+            echo ""
+            echo -n "API key (sk-ant-...): "
+            read -rs api_key
+            echo ""
+
+            if [[ -n "${api_key}" ]]; then
+                config_set "claude_api_key" "${api_key}"
+            else
+                print_warning "Skipped - you can set it later with: acp config set claude_api_key <key>"
+            fi
+            ;;
+        ollama)
+            echo -e "${BOLD}Step 2:${NC} Checking Ollama installation..."
+            echo ""
+
+            if ! command -v ollama &>/dev/null; then
+                print_warning "Ollama not found"
+                echo ""
+                echo "  Install Ollama from: ${CYAN}https://ollama.ai${NC}"
+                echo ""
+                echo "  Then pull a model:"
+                echo "    ollama pull qwen2.5-coder:7b"
+                echo ""
+            else
+                print_success "Ollama is installed"
+
+                # Check if running
+                if curl -s --connect-timeout 2 http://localhost:11434/api/tags &>/dev/null; then
+                    local models
+                    models=$(curl -s http://localhost:11434/api/tags | jq -r '.models[].name' 2>/dev/null)
+
+                    if [[ -n "${models}" ]]; then
+                        print_success "Found models:"
+                        echo "${models}" | while read -r m; do echo "    - ${m}"; done
+                    else
+                        print_warning "No models installed"
+                        echo "  Run: ollama pull qwen2.5-coder:7b"
+                    fi
+                else
+                    print_warning "Ollama is not running"
+                    echo "  Start it with: ollama serve"
+                fi
+            fi
+            ;;
+    esac
+
+    echo ""
+
+    # Step 3: Auto-push preference
+    echo -e "${BOLD}Step 3:${NC} Auto-push after commit?"
+    echo ""
+    echo -n "Push to remote automatically? [Y/n]: "
+    read -r auto_push_choice
+
+    case "${auto_push_choice}" in
+        n|N|no|No|NO)
+            config_set "auto_push" "false"
+            ;;
+        *)
+            config_set "auto_push" "true"
+            ;;
+    esac
+
+    echo ""
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    print_success "Setup complete!"
+    echo ""
+    echo "Your configuration:"
+    config_list
+    echo ""
+    echo "You're ready to go! Try running ${BOLD}acp${NC} in a git repository."
+    echo ""
 }
 
 # ============================================================================
@@ -530,6 +802,19 @@ check_dependencies() {
 }
 
 main() {
+    # Handle subcommands first
+    case "${1:-}" in
+        setup)
+            cmd_setup
+            exit 0
+            ;;
+        config)
+            shift
+            cmd_config "$@"
+            exit 0
+            ;;
+    esac
+
     parse_args "$@"
     check_dependencies
     load_config

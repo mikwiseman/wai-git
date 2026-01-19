@@ -38,6 +38,9 @@ sudo cp acp /usr/local/bin/
 ## Quick Start
 
 ```bash
+# First time? Run the setup wizard
+acp setup
+
 # Make some changes to your code
 echo "console.log('hello')" >> app.js
 
@@ -64,7 +67,52 @@ Commit with this message? [Y/n/e(dit)] y
 
 ## Configuration
 
-Create a config file at `~/.config/acp/config`:
+### Setup Wizard (Recommended)
+
+The easiest way to configure `acp` is with the interactive setup wizard:
+
+```bash
+acp setup
+```
+
+This will guide you through:
+1. Choosing your AI provider (OpenAI, Claude, or Ollama)
+2. Entering your API key (with secure input)
+3. Setting auto-push preferences
+
+### Config Commands
+
+Manage configuration directly:
+
+```bash
+# Show current configuration
+acp config list
+
+# Set a value
+acp config set provider claude
+acp config set openai_api_key sk-...
+
+# Get a value
+acp config get provider
+
+# Show config file path
+acp config path
+```
+
+**Available config keys:**
+| Key | Description |
+|-----|-------------|
+| `provider` | AI provider (openai, claude, ollama) |
+| `openai_api_key` | OpenAI API key |
+| `openai_model` | OpenAI model (default: gpt-5-mini) |
+| `claude_api_key` | Claude/Anthropic API key |
+| `claude_model` | Claude model (default: claude-haiku-4-5) |
+| `ollama_model` | Ollama model (auto-detect if empty) |
+| `auto_push` | Auto-push after commit (true/false) |
+
+### Manual Configuration
+
+You can also edit the config file directly at `~/.config/acp/config`:
 
 ```bash
 # Provider: claude | openai | ollama
@@ -83,7 +131,6 @@ ACP_OLLAMA_MODEL=
 
 # Behavior
 ACP_AUTO_PUSH=true
-ACP_CONVENTIONAL=true
 ```
 
 ### Environment Variables
