@@ -1,0 +1,599 @@
+#!/usr/bin/env bash
+#
+# acp - AI-powered git add, commit, and push
+# https://github.com/mikwiseman/wai-git
+#
+# Usage: acp [options]
+#
+# Options:
+#   -y, --yes       Skip confirmation prompt
+#   -d, --dry-run   Generate message without committing
+#   -n, --no-push   Commit but don't push
+#   -p, --provider  AI provider (claude, openai, ollama)
+#   -m, --model     Model to use (overrides default)
+#   -s, --scope     Scope for conventional commit
+#   -h, --help      Show this help message
+#   -v, --version   Show version number
+#
+set -euo pipefail
+
+VERSION="1.0.0"
+CONFIG_DIR="${HOME}/.config/acp"
+CONFIG_FILE="${CONFIG_DIR}/config"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m' # No Color
+
+# Default settings
+DEFAULT_PROVIDER="openai"
+DEFAULT_OPENAI_MODEL="gpt-5-mini"
+DEFAULT_CLAUDE_MODEL="claude-haiku-4-5"
+AUTO_PUSH=true
+CONVENTIONAL=true
+
+# CLI options
+DRY_RUN=false
+NO_PUSH=false
+SKIP_CONFIRM=false
+PROVIDER=""
+MODEL=""
+SCOPE=""
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+print_error() {
+    echo -e "${RED}error:${NC} $1" >&2
+}
+
+print_success() {
+    echo -e "${GREEN}✓${NC} $1"
+}
+
+print_info() {
+    echo -e "${BLUE}→${NC} $1"
+}
+
+print_warning() {
+    echo -e "${YELLOW}!${NC} $1"
+}
+
+show_version() {
+    echo "acp version ${VERSION}"
+}
+
+show_help() {
+    cat << EOF
+${BOLD}acp${NC} - AI-powered git add, commit, and push
+
+${BOLD}USAGE${NC}
+    acp [options]
+
+${BOLD}OPTIONS${NC}
+    -y, --yes       Skip confirmation prompt
+    -d, --dry-run   Generate message without committing
+    -n, --no-push   Commit but don't push
+    -p, --provider  AI provider: claude, openai, ollama (default: openai)
+    -m, --model     Model to use (overrides config default)
+    -s, --scope     Scope for conventional commit (e.g., "auth", "api")
+    -h, --help      Show this help message
+    -v, --version   Show version number
+
+${BOLD}EXAMPLES${NC}
+    acp                      # Stage all, generate message, commit, push
+    acp --dry-run            # Generate message without committing
+    acp --provider claude    # Use Claude instead of OpenAI
+    acp --no-push            # Commit but don't push
+    acp -y                   # Skip confirmation
+    acp --scope auth         # Add scope: feat(auth): ...
+
+${BOLD}CONFIGURATION${NC}
+    Config file: ~/.config/acp/config
+
+    # Provider settings
+    ACP_PROVIDER=openai              # claude | openai | ollama
+    ACP_OPENAI_API_KEY=sk-...
+    ACP_OPENAI_MODEL=gpt-5-mini
+    ACP_CLAUDE_API_KEY=sk-ant-...
+    ACP_CLAUDE_MODEL=claude-haiku-4-5
+    ACP_OLLAMA_MODEL=                # Leave empty to auto-detect
+
+    # Behavior
+    ACP_AUTO_PUSH=true
+    ACP_CONVENTIONAL=true
+
+${BOLD}MORE INFO${NC}
+    https://github.com/mikwiseman/wai-git
+EOF
+}
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+load_config() {
+    # Load config file if it exists
+    if [[ -f "${CONFIG_FILE}" ]]; then
+        # shellcheck source=/dev/null
+        source "${CONFIG_FILE}"
+    fi
+
+    # Apply config values (with fallbacks)
+    PROVIDER="${PROVIDER:-${ACP_PROVIDER:-${DEFAULT_PROVIDER}}}"
+    AUTO_PUSH="${ACP_AUTO_PUSH:-${AUTO_PUSH}}"
+    CONVENTIONAL="${ACP_CONVENTIONAL:-${CONVENTIONAL}}"
+
+    # Provider-specific defaults
+    case "${PROVIDER}" in
+        openai)
+            MODEL="${MODEL:-${ACP_OPENAI_MODEL:-${DEFAULT_OPENAI_MODEL}}}"
+            ;;
+        claude)
+            MODEL="${MODEL:-${ACP_CLAUDE_MODEL:-${DEFAULT_CLAUDE_MODEL}}}"
+            ;;
+        ollama)
+            MODEL="${MODEL:-${ACP_OLLAMA_MODEL:-}}"
+            ;;
+    esac
+}
+
+ensure_config_dir() {
+    if [[ ! -d "${CONFIG_DIR}" ]]; then
+        mkdir -p "${CONFIG_DIR}"
+    fi
+}
+
+# ============================================================================
+# Git Functions
+# ============================================================================
+
+check_git_repo() {
+    if ! git rev-parse --is-inside-work-tree &>/dev/null; then
+        print_error "Not a git repository"
+        exit 1
+    fi
+}
+
+check_changes() {
+    # Check for any changes (staged, unstaged, or untracked)
+    local has_staged has_unstaged has_untracked
+
+    # Check staged changes
+    has_staged=$(git diff --cached --quiet 2>/dev/null; echo $?)
+
+    # Check unstaged changes (handle fresh repo with no commits)
+    if git rev-parse HEAD &>/dev/null; then
+        has_unstaged=$(git diff --quiet HEAD 2>/dev/null; echo $?)
+    else
+        # Fresh repo - check if there are any files at all
+        has_unstaged=1
+    fi
+
+    # Check untracked files
+    has_untracked=$(git ls-files --others --exclude-standard)
+
+    if [[ "${has_staged}" -eq 0 ]] && [[ "${has_unstaged}" -eq 0 ]] && [[ -z "${has_untracked}" ]]; then
+        print_error "No changes to commit"
+        exit 0
+    fi
+}
+
+stage_changes() {
+    # Check if there are already staged changes
+    if ! git diff --cached --quiet 2>/dev/null; then
+        print_info "Using already staged changes"
+        return
+    fi
+
+    # Stage all changes
+    print_info "Staging all changes..."
+    git add -A
+}
+
+get_diff() {
+    # Get staged diff (limit to reasonable size for API)
+    local diff
+    diff=$(git diff --cached --stat && echo "---" && git diff --cached | head -c 10000)
+
+    if [[ -z "${diff}" ]]; then
+        print_error "No staged changes found"
+        exit 1
+    fi
+
+    echo "${diff}"
+}
+
+get_branch() {
+    git branch --show-current
+}
+
+commit_changes() {
+    local message="$1"
+    git commit -m "${message}"
+}
+
+push_changes() {
+    local branch
+    branch=$(get_branch)
+
+    # Check if remote exists
+    if ! git remote | grep -q .; then
+        print_warning "No remote configured, skipping push"
+        return
+    fi
+
+    # Check if branch has upstream
+    if git rev-parse --abbrev-ref --symbolic-full-name "@{u}" &>/dev/null; then
+        print_info "Pushing to remote..."
+        git push
+    else
+        print_info "Setting upstream and pushing..."
+        git push -u origin "${branch}"
+    fi
+}
+
+# ============================================================================
+# AI Provider Functions
+# ============================================================================
+
+build_prompt() {
+    local diff="$1"
+    local scope_hint=""
+
+    if [[ -n "${SCOPE}" ]]; then
+        scope_hint="Use scope: ${SCOPE}"
+    fi
+
+    cat << EOF
+Generate a git commit message for the following changes. Use Conventional Commits format.
+
+Rules:
+- Start with type: feat, fix, docs, style, refactor, test, or chore
+- Add scope in parentheses if applicable (e.g., feat(auth):)
+- Keep the subject line under 72 characters
+- Use imperative mood ("add" not "added")
+- Be concise but descriptive
+- Do NOT include a body, just the single-line message
+${scope_hint}
+
+Respond with ONLY the commit message, nothing else.
+
+Changes:
+${diff}
+EOF
+}
+
+call_openai() {
+    local prompt="$1"
+    local api_key="${ACP_OPENAI_API_KEY:-${OPENAI_API_KEY:-}}"
+
+    if [[ -z "${api_key}" ]]; then
+        print_error "OpenAI API key not found"
+        echo "Set ACP_OPENAI_API_KEY in ${CONFIG_FILE} or OPENAI_API_KEY env var"
+        exit 1
+    fi
+
+    local response http_code
+    response=$(curl -s --connect-timeout 10 -w "\n%{http_code}" https://api.openai.com/v1/chat/completions \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer ${api_key}" \
+        -d "$(jq -n \
+            --arg model "${MODEL}" \
+            --arg prompt "${prompt}" \
+            '{
+                model: $model,
+                messages: [
+                    {role: "system", content: "You are a helpful assistant that generates concise git commit messages following Conventional Commits format."},
+                    {role: "user", content: $prompt}
+                ],
+                max_tokens: 100,
+                temperature: 0.3
+            }')")
+
+    # Extract HTTP code from response
+    http_code=$(echo "${response}" | tail -n1)
+    response=$(echo "${response}" | sed '$d')
+
+    # Check for network/curl errors
+    if [[ -z "${response}" ]] || [[ "${http_code}" -lt 200 ]] || [[ "${http_code}" -ge 300 ]]; then
+        print_error "OpenAI API request failed (HTTP ${http_code})"
+        exit 1
+    fi
+
+    # Check for API errors
+    if echo "${response}" | jq -e '.error' &>/dev/null; then
+        local error_msg
+        error_msg=$(echo "${response}" | jq -r '.error.message')
+        print_error "OpenAI API error: ${error_msg}"
+        exit 1
+    fi
+
+    # Extract message
+    echo "${response}" | jq -r '.choices[0].message.content' | tr -d '\n'
+}
+
+call_claude() {
+    local prompt="$1"
+    local api_key="${ACP_CLAUDE_API_KEY:-${ANTHROPIC_API_KEY:-}}"
+
+    if [[ -z "${api_key}" ]]; then
+        print_error "Claude API key not found"
+        echo "Set ACP_CLAUDE_API_KEY in ${CONFIG_FILE} or ANTHROPIC_API_KEY env var"
+        exit 1
+    fi
+
+    local response http_code
+    response=$(curl -s --connect-timeout 10 -w "\n%{http_code}" https://api.anthropic.com/v1/messages \
+        -H "Content-Type: application/json" \
+        -H "x-api-key: ${api_key}" \
+        -H "anthropic-version: 2023-06-01" \
+        -d "$(jq -n \
+            --arg model "${MODEL}" \
+            --arg prompt "${prompt}" \
+            '{
+                model: $model,
+                max_tokens: 100,
+                messages: [
+                    {role: "user", content: $prompt}
+                ]
+            }')")
+
+    # Extract HTTP code from response
+    http_code=$(echo "${response}" | tail -n1)
+    response=$(echo "${response}" | sed '$d')
+
+    # Check for network/curl errors
+    if [[ -z "${response}" ]] || [[ "${http_code}" -lt 200 ]] || [[ "${http_code}" -ge 300 ]]; then
+        print_error "Claude API request failed (HTTP ${http_code})"
+        exit 1
+    fi
+
+    # Check for API errors
+    if echo "${response}" | jq -e '.error' &>/dev/null; then
+        local error_msg
+        error_msg=$(echo "${response}" | jq -r '.error.message')
+        print_error "Claude API error: ${error_msg}"
+        exit 1
+    fi
+
+    # Extract message
+    echo "${response}" | jq -r '.content[0].text' | tr -d '\n'
+}
+
+detect_ollama_model() {
+    # Check if Ollama is running
+    if ! curl -s --connect-timeout 2 http://localhost:11434/api/tags &>/dev/null; then
+        print_error "Ollama is not running"
+        echo "Start Ollama with: ollama serve"
+        exit 1
+    fi
+
+    # Auto-detect model if not set
+    if [[ -z "${MODEL}" ]]; then
+        local models
+        models=$(curl -s http://localhost:11434/api/tags | jq -r '.models[].name' 2>/dev/null)
+
+        if [[ -z "${models}" ]]; then
+            print_error "No Ollama models found"
+            echo "Install a model with:"
+            echo "  ollama pull qwen2.5-coder:7b    # Good for code, 4.7GB"
+            echo "  ollama pull llama3.2:3b         # Fast, 2GB"
+            exit 1
+        fi
+
+        # Use first available model
+        MODEL=$(echo "${models}" | head -n1)
+        print_info "Auto-detected Ollama model: ${MODEL}"
+    fi
+}
+
+call_ollama() {
+    local prompt="$1"
+
+    local response
+    # Ollama can be slow for large models, use longer timeout
+    response=$(curl -s --max-time 120 http://localhost:11434/api/chat \
+        -d "$(jq -n \
+            --arg model "${MODEL}" \
+            --arg prompt "${prompt}" \
+            '{
+                model: $model,
+                messages: [
+                    {role: "system", content: "You are a helpful assistant that generates concise git commit messages following Conventional Commits format. Respond with ONLY the commit message."},
+                    {role: "user", content: $prompt}
+                ],
+                stream: false
+            }')")
+
+    # Check for curl/network errors
+    if [[ -z "${response}" ]]; then
+        print_error "Ollama request failed (no response)"
+        exit 1
+    fi
+
+    # Check for API errors
+    if echo "${response}" | jq -e '.error' &>/dev/null; then
+        local error_msg
+        error_msg=$(echo "${response}" | jq -r '.error')
+        print_error "Ollama error: ${error_msg}"
+        exit 1
+    fi
+
+    # Extract message
+    echo "${response}" | jq -r '.message.content' | tr -d '\n' | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//'
+}
+
+generate_message() {
+    local diff="$1"
+    local prompt
+    prompt=$(build_prompt "${diff}")
+
+    # For Ollama, detect model first so we can display it
+    if [[ "${PROVIDER}" == "ollama" ]]; then
+        detect_ollama_model
+    fi
+
+    print_info "Generating commit message with ${PROVIDER} (${MODEL})..."
+
+    case "${PROVIDER}" in
+        openai)
+            call_openai "${prompt}"
+            ;;
+        claude)
+            call_claude "${prompt}"
+            ;;
+        ollama)
+            call_ollama "${prompt}"
+            ;;
+        *)
+            print_error "Unknown provider: ${PROVIDER}"
+            exit 1
+            ;;
+    esac
+}
+
+# ============================================================================
+# Main
+# ============================================================================
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            -v|--version)
+                show_version
+                exit 0
+                ;;
+            -y|--yes)
+                SKIP_CONFIRM=true
+                shift
+                ;;
+            -d|--dry-run)
+                DRY_RUN=true
+                shift
+                ;;
+            -n|--no-push)
+                NO_PUSH=true
+                shift
+                ;;
+            -p|--provider)
+                PROVIDER="$2"
+                shift 2
+                ;;
+            -m|--model)
+                MODEL="$2"
+                shift 2
+                ;;
+            -s|--scope)
+                SCOPE="$2"
+                shift 2
+                ;;
+            *)
+                print_error "Unknown option: $1"
+                echo "Run 'acp --help' for usage"
+                exit 1
+                ;;
+        esac
+    done
+}
+
+check_dependencies() {
+    local missing=()
+
+    if ! command -v git &>/dev/null; then
+        missing+=("git")
+    fi
+    if ! command -v curl &>/dev/null; then
+        missing+=("curl")
+    fi
+    if ! command -v jq &>/dev/null; then
+        missing+=("jq")
+    fi
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        print_error "Missing required dependencies: ${missing[*]}"
+        echo "Install with:"
+        echo "  macOS: brew install ${missing[*]}"
+        echo "  Ubuntu: sudo apt install ${missing[*]}"
+        exit 1
+    fi
+}
+
+main() {
+    parse_args "$@"
+    check_dependencies
+    load_config
+    check_git_repo
+    check_changes
+
+    # Stage changes
+    stage_changes
+
+    # Get diff
+    local diff
+    diff=$(get_diff)
+
+    # Generate commit message
+    local message
+    message=$(generate_message "${diff}")
+
+    # Clean up message (remove quotes if present)
+    message=$(echo "${message}" | sed 's/^"//;s/"$//' | sed "s/^'//;s/'$//")
+
+    echo ""
+    echo -e "${BOLD}Generated commit message:${NC}"
+    echo -e "${CYAN}${message}${NC}"
+    echo ""
+
+    # Dry run - just show the message
+    if [[ "${DRY_RUN}" == true ]]; then
+        print_info "Dry run - no commit made (changes remain staged)"
+        exit 0
+    fi
+
+    # Confirm with user
+    if [[ "${SKIP_CONFIRM}" != true ]]; then
+        echo -n "Commit with this message? [Y/n/e(dit)] "
+        read -r confirm
+
+        case "${confirm}" in
+            n|N|no|No|NO)
+                print_info "Aborted"
+                exit 0
+                ;;
+            e|E|edit|Edit|EDIT)
+                echo -n "Enter new message: "
+                read -r message
+                ;;
+            *)
+                # Default to yes
+                ;;
+        esac
+    fi
+
+    # Commit
+    print_info "Committing..."
+    commit_changes "${message}"
+    print_success "Committed!"
+
+    # Push (unless --no-push)
+    if [[ "${NO_PUSH}" != true ]] && [[ "${AUTO_PUSH}" == true ]]; then
+        push_changes
+        print_success "Pushed!"
+    fi
+
+    echo ""
+    print_success "Done!"
+}
+
+main "$@"

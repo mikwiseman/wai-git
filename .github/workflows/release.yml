@@ -1,0 +1,118 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get version
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            acp
+            install.sh
+
+  update-homebrew:
+    needs: release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get version
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Calculate SHA256
+        id: sha
+        run: |
+          SHA=$(curl -sL "https://github.com/${{ github.repository }}/archive/refs/tags/${GITHUB_REF#refs/tags/}.tar.gz" | sha256sum | cut -d' ' -f1)
+          echo "sha256=${SHA}" >> $GITHUB_OUTPUT
+
+      - name: Update Homebrew Formula
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          script: |
+            const version = '${{ steps.version.outputs.version }}';
+            const sha256 = '${{ steps.sha.outputs.sha256 }}';
+            const owner = 'mikwiseman';
+            const repo = 'homebrew-wai-git';
+            const path = 'Formula/acp.rb';
+
+            const formula = `class Acp < Formula
+              desc "AI-powered git add, commit, and push in one command"
+              homepage "https://github.com/mikwiseman/wai-git"
+              url "https://github.com/mikwiseman/wai-git/archive/refs/tags/v${version}.tar.gz"
+              sha256 "${sha256}"
+              license "MIT"
+
+              depends_on "curl"
+              depends_on "git"
+              depends_on "jq"
+
+              def install
+                bin.install "acp"
+              end
+
+              def caveats
+                <<~EOS
+                  To use acp, configure your API key:
+
+                    mkdir -p ~/.config/acp
+                    echo 'ACP_OPENAI_API_KEY=sk-...' >> ~/.config/acp/config
+
+                  Or use Ollama (free, local):
+
+                    ollama pull qwen2.5-coder:7b
+                    acp --provider ollama
+                EOS
+              end
+
+              test do
+                assert_match "acp version", shell_output("#{bin}/acp --version")
+              end
+            end
+            `;
+
+            // Get the current file to get its SHA (needed for update)
+            let fileSha;
+            try {
+              const { data } = await github.rest.repos.getContent({
+                owner,
+                repo,
+                path,
+              });
+              fileSha = data.sha;
+            } catch (e) {
+              // File doesn't exist yet
+              fileSha = null;
+            }
+
+            // Create or update the file
+            await github.rest.repos.createOrUpdateFileContents({
+              owner,
+              repo,
+              path,
+              message: `Update acp to v${version}`,
+              content: Buffer.from(formula).toString('base64'),
+              sha: fileSha,
+            });
+
+            console.log(`Updated Homebrew formula to v${version}`);
