@@ -64,16 +64,22 @@ homebrew-wai-git/
 
 ## Release Process
 
-### Step-by-step checklist:
+**IMPORTANT:** Every release requires updating BOTH repositories and verifying the local installation.
+
+### Full Release Checklist
+
+#### Phase 1: Update Main Repository (wai-git)
 
 ```bash
-# 1. Update version in acp
-VERSION="X.Y.Z"  # line ~20 in acp
+cd ~/Documents/Code/wai-git
+
+# 1. Update VERSION in acp (line ~20)
+# VERSION="X.Y.Z"
 
 # 2. Update CHANGELOG.md
-## [X.Y.Z] - YYYY-MM-DD
-### Added/Changed/Fixed
-- Description
+# ## [X.Y.Z] - YYYY-MM-DD
+# ### Added/Changed/Fixed
+# - Description
 
 # 3. Commit and push
 git add -A
@@ -83,38 +89,68 @@ git push
 # 4. Create and push tag
 git tag vX.Y.Z
 git push origin vX.Y.Z
+```
 
-# 5. Get SHA256 of new tarball
+#### Phase 2: Update Homebrew Tap (homebrew-wai-git)
+
+```bash
+# 5. Get SHA256 of new tarball (wait a few seconds after pushing tag)
 curl -sL https://github.com/mikwiseman/wai-git/archive/refs/tags/vX.Y.Z.tar.gz | shasum -a 256
 
-# 6. Update Homebrew formula (in homebrew-wai-git repo)
-# Edit Formula/acp.rb:
-#   url "...vX.Y.Z.tar.gz"
-#   sha256 "NEW_HASH"
+# 6. Update Formula/acp.rb in homebrew-wai-git:
+#    - url "https://github.com/mikwiseman/wai-git/archive/refs/tags/vX.Y.Z.tar.gz"
+#    - sha256 "NEW_HASH_HERE"
 
 # 7. Commit and push formula
-cd ../homebrew-wai-git
+cd ~/Documents/Code/homebrew-wai-git
 git add -A
 git commit -m "acp X.Y.Z"
 git push
-
-# 8. Update local installation
-brew update
-brew upgrade acp
-acp --version  # Verify
 ```
 
-### Quick Release (one-liner after code changes)
+#### Phase 3: Verify Local Installation
 
 ```bash
-# After editing acp and CHANGELOG.md:
-cd ~/Documents/Code/wai-git && \
-git add -A && git commit -m "description" && git push && \
-git tag v1.X.X && git push origin v1.X.X && \
-SHA=$(curl -sL https://github.com/mikwiseman/wai-git/archive/refs/tags/v1.X.X.tar.gz | shasum -a 256 | cut -d' ' -f1) && \
-echo "SHA256: $SHA"
+# 8. Update brew and upgrade
+brew update
+brew upgrade acp
 
-# Then update homebrew-wai-git/Formula/acp.rb with new version and SHA
+# 9. VERIFY the new version is installed
+acp --version
+# Should output: acp version X.Y.Z
+
+# If still shows old version:
+brew update  # Try again
+brew upgrade acp
+```
+
+### Release Verification Checklist
+
+After release, confirm:
+- [ ] `git tag` shows new version in wai-git
+- [ ] GitHub shows new tag at https://github.com/mikwiseman/wai-git/tags
+- [ ] homebrew-wai-git Formula/acp.rb has correct version and SHA
+- [ ] `acp --version` shows new version after `brew upgrade`
+
+### Troubleshooting Release
+
+**brew upgrade shows "already installed":**
+```bash
+brew update                    # Force tap refresh
+brew upgrade acp              # Try again
+```
+
+**Wrong SHA256 error:**
+```bash
+# Re-fetch SHA (tag might not be available yet)
+sleep 5
+curl -sL https://github.com/mikwiseman/wai-git/archive/refs/tags/vX.Y.Z.tar.gz | shasum -a 256
+```
+
+**homebrew-wai-git push rejected:**
+```bash
+git pull --rebase
+git push
 ```
 
 ---
