@@ -17,7 +17,7 @@
 #
 set -euo pipefail
 
-VERSION="1.2.2"
+VERSION="1.2.3"
 CONFIG_DIR="${HOME}/.config/acp"
 CONFIG_FILE="${CONFIG_DIR}/config"
 
@@ -494,7 +494,9 @@ Rules:
 - Keep the subject line under 72 characters
 - Use imperative mood ("add" not "added")
 - Be concise but descriptive
-- Do NOT include a body, just the single-line message
+- For small changes: single-line message only
+- For large/complex changes: add a body with bullet points explaining key changes
+- If adding body, separate subject and body with a blank line
 ${scope_hint}
 
 Respond with ONLY the commit message, nothing else.
@@ -527,7 +529,7 @@ call_openai() {
                     {role: "system", content: "You are a helpful assistant that generates concise git commit messages following Conventional Commits format."},
                     {role: "user", content: $prompt}
                 ],
-                max_tokens: 100,
+                max_tokens: 500,
                 temperature: 0.3
             }')")
 
@@ -550,7 +552,7 @@ call_openai() {
     fi
 
     # Extract message
-    echo "${response}" | jq -r '.choices[0].message.content' | tr -d '\n'
+    echo "${response}" | jq -r '.choices[0].message.content'
 }
 
 call_claude() {
@@ -573,7 +575,7 @@ call_claude() {
             --arg prompt "${prompt}" \
             '{
                 model: $model,
-                max_tokens: 100,
+                max_tokens: 500,
                 messages: [
                     {role: "user", content: $prompt}
                 ]
@@ -598,7 +600,7 @@ call_claude() {
     fi
 
     # Extract message
-    echo "${response}" | jq -r '.content[0].text' | tr -d '\n'
+    echo "${response}" | jq -r '.content[0].text'
 }
 
 detect_ollama_model() {
@@ -661,7 +663,7 @@ call_ollama() {
     fi
 
     # Extract message
-    echo "${response}" | jq -r '.message.content' | tr -d '\n' | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//'
+    echo "${response}" | jq -r '.message.content' | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//'
 }
 
 generate_message() {

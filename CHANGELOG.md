@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.3] - 2026-01-19
+
+### Added
+- Multi-line commit messages for large/complex changes (subject + body with bullet points)
+
+### Changed
+- Increased max_tokens from 100 to 500 for OpenAI and Claude
+- AI prompt now instructs to add body for complex changes
+- Removed newline stripping from AI response processing
+
 ## [1.2.2] - 2026-01-19
 
 ### Fixed
