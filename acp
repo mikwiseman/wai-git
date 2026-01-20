@@ -17,7 +17,7 @@
 #
 set -euo pipefail
 
-VERSION="1.2.3"
+VERSION="1.2.4"
 CONFIG_DIR="${HOME}/.config/acp"
 CONFIG_FILE="${CONFIG_DIR}/config"
 
@@ -54,15 +54,15 @@ print_error() {
 }
 
 print_success() {
-    echo -e "${GREEN}✓${NC} $1"
+    echo -e "${GREEN}✓${NC} $1" >&2
 }
 
 print_info() {
-    echo -e "${BLUE}→${NC} $1"
+    echo -e "${BLUE}→${NC} $1" >&2
 }
 
 print_warning() {
-    echo -e "${YELLOW}!${NC} $1"
+    echo -e "${YELLOW}!${NC} $1" >&2
 }
 
 show_version() {
